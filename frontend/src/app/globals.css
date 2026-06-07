@@ -1,0 +1,93 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --font-display: "Fraunces", Georgia, "Times New Roman", serif;
+  --font-sans: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", Menlo, monospace;
+  --bg: 250 249 246;
+  --surface: 255 255 255;
+  --elevated: 255 255 255;
+  --border: 228 225 218;
+  --ink: 26 26 24;
+  --muted: 92 90 84;
+  --faint: 148 145 138;
+  --accent: 36 86 219;
+  --accent-soft: 224 231 250;
+  --positive: 22 137 92;
+  --warn: 181 122 18;
+  --danger: 197 58 50;
+}
+
+.dark {
+  --bg: 13 14 16;
+  --surface: 21 23 26;
+  --elevated: 28 31 35;
+  --border: 42 46 52;
+  --ink: 237 236 232;
+  --muted: 158 160 165;
+  --faint: 108 111 117;
+  --accent: 99 142 255;
+  --accent-soft: 30 41 71;
+  --positive: 52 178 128;
+  --warn: 214 161 74;
+  --danger: 232 110 102;
+}
+
+* { border-color: rgb(var(--border)); }
+
+html { scroll-behavior: smooth; }
+
+body {
+  background: rgb(var(--bg));
+  color: rgb(var(--ink));
+  font-feature-settings: "ss01", "cv01", "cv11";
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection { background: rgb(var(--accent) / 0.22); }
+
+/* Grain / atmosphere */
+.grain::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+  opacity: 0.025;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+.scrollbar-thin::-webkit-scrollbar { width: 8px; height: 8px; }
+.scrollbar-thin::-webkit-scrollbar-thumb { background: rgb(var(--border)); border-radius: 8px; }
+.scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
+
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  background: rgb(var(--border) / 0.4);
+}
+.skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, rgb(var(--surface) / 0.6), transparent);
+  animation: shimmer 1.6s infinite;
+}
+
+.text-balance { text-wrap: balance; }
+.dot-grid {
+  background-image: radial-gradient(rgb(var(--border)) 1px, transparent 1px);
+  background-size: 22px 22px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}

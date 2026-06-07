@@ -1,0 +1,23 @@
+{
+  "name": "backend",
+  "version": "1.0.0",
+  "description": "This bundle is the **backend design + reference implementation** for the Vesper frontend. It is built so the existing UI swaps from mock data to real APIs with minimal refactoring: every endpoint returns the exact shapes in `src/lib/data.ts`.",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "prisma": "^7.8.0"
+  },
+  "dependencies": {
+    "@prisma/client": "^7.8.0",
+    "zod": "^4.4.3"
+  }
+}

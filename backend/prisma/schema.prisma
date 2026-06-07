@@ -1,0 +1,503 @@
+// Vesper — Backend foundation (Phase 1)
+// MySQL 8 + Prisma. No telephony / AI / queues yet — schema is designed so those
+// layers attach later without migration of existing tables.
+//
+// Multi-tenancy model: every tenant-owned row carries organizationId and is always
+// queried with it. Application-level scoping (every where-clause includes the org)
+// is the enforced boundary; there is no row-level security in MySQL, so the service
+// layer is responsible — see docs/BACKEND_ARCHITECTURE.md "Multi-tenancy".
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// ENUMS  (string-backed in MySQL; values chosen to match frontend literals)
+// ---------------------------------------------------------------------------
+
+enum MemberRole {
+  OWNER
+  ADMIN
+  MANAGER
+  VIEWER
+}
+
+enum AgentStatus {
+  LIVE
+  DRAFT
+  PAUSED
+}
+
+enum CallOutcome {
+  BOOKED
+  QUALIFIED
+  NO_ANSWER
+  ESCALATED
+  RESOLVED
+  DECLINED
+}
+
+enum CallSentiment {
+  POSITIVE
+  NEUTRAL
+  NEGATIVE
+}
+
+enum CallDirection {
+  INBOUND
+  OUTBOUND
+}
+
+enum CampaignStatus {
+  RUNNING
+  SCHEDULED
+  COMPLETED
+  PAUSED
+  DRAFT
+}
+
+enum DocumentStatus {
+  INDEXED
+  PROCESSING
+  FAILED
+}
+
+enum DocumentType {
+  PDF
+  DOCX
+  TXT
+  CSV
+}
+
+enum PhoneType {
+  INBOUND
+  OUTBOUND
+}
+
+enum PhoneStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum ContactStatus {
+  PENDING
+  REACHED
+  FAILED
+  COMPLETED
+  DO_NOT_CALL
+}
+
+enum SubscriptionPlan {
+  STARTER
+  GROWTH
+  ENTERPRISE
+}
+
+enum SubscriptionStatus {
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  CANCELED
+  INCOMPLETE
+}
+
+enum InvoiceStatus {
+  PAID
+  OPEN
+  VOID
+  UNCOLLECTIBLE
+}
+
+// ---------------------------------------------------------------------------
+// IDENTITY  — Users, Organizations, Members (the tenancy spine)
+// ---------------------------------------------------------------------------
+
+model User {
+  id        String   @id @default(cuid())
+  // Clerk/Auth.js subject id. Unique external auth identity.
+  authId    String   @unique
+  email     String   @unique
+  name      String
+  avatarUrl String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  memberships     Member[]
+  ownedOrgs       Organization[] @relation("OrgOwner")
+  auditLogs       AuditLog[]
+
+  @@index([email])
+  @@map("users")
+}
+
+model Organization {
+  id        String   @id @default(cuid())
+  name      String
+  // URL-safe tenant handle, e.g. "sunaulo" -> app.vesper.ai/sunaulo
+  slug      String   @unique
+  ownerId   String
+  // Free-form JSON: branding (color, logoUrl), defaultTimezone, notification prefs.
+  settings  Json?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  owner         User           @relation("OrgOwner", fields: [ownerId], references: [id])
+  members       Member[]
+  agents        Agent[]
+  knowledgeBases KnowledgeBase[]
+  documents     Document[]
+  phoneNumbers  PhoneNumber[]
+  calls         Call[]
+  campaigns     Campaign[]
+  contacts      Contact[]
+  apiKeys       ApiKey[]
+  subscription  Subscription?
+  invoices      Invoice[]
+  usageCounters UsageCounter[]
+  auditLogs     AuditLog[]
+
+  @@index([ownerId])
+  @@map("organizations")
+}
+
+model Member {
+  id             String     @id @default(cuid())
+  organizationId String
+  userId         String
+  role           MemberRole @default(VIEWER)
+  createdAt      DateTime   @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // A user has exactly one membership row per org.
+  @@unique([organizationId, userId])
+  @@index([userId])
+  @@map("members")
+}
+
+// ---------------------------------------------------------------------------
+// AGENTS  — slim list shape (data.ts Agent) + full builder fields
+// ---------------------------------------------------------------------------
+
+model Agent {
+  id             String      @id @default(cuid())
+  organizationId String
+  name           String
+  description    String      @db.Text
+  // Stored as the UI's display string for now ("Maya (warm)"); becomes voiceId FK
+  // when the TTS layer is added (out of Phase 1 scope).
+  voice          String
+  // Display string for now ("Nepali · English").
+  language       String
+  status         AgentStatus @default(DRAFT)
+
+  // ---- Builder-only fields (not shown in list view, but edited in the builder) ----
+  prompt        String  @db.Text
+  speakingSpeed Float   @default(1.0)
+  // Array of rule strings / structured rules. JSON keeps Phase 1 simple.
+  behaviorRules Json?
+  // { mon: {open:"09:00", close:"18:00"}, ... } or null = always.
+  businessHours Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organization   Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  knowledgeBases KnowledgeBase[]
+  calls          Call[]
+  campaigns      Campaign[]
+  phoneNumbers   PhoneNumber[]
+
+  // List ordering is by updatedAt; status filters are common.
+  @@index([organizationId, status])
+  @@index([organizationId, updatedAt])
+  @@map("agents")
+}
+
+// ---------------------------------------------------------------------------
+// KNOWLEDGE  — KnowledgeBase + Document
+// ---------------------------------------------------------------------------
+
+model KnowledgeBase {
+  id             String   @id @default(cuid())
+  organizationId String
+  agentId        String?
+  title          String
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  agent        Agent?       @relation(fields: [agentId], references: [id], onDelete: SetNull)
+  documents    Document[]
+
+  @@index([organizationId])
+  @@index([agentId])
+  @@map("knowledge_bases")
+}
+
+model Document {
+  id              String         @id @default(cuid())
+  organizationId  String
+  knowledgeBaseId String?
+  // Original filename incl. extension: "Clinic FAQ & Policies.pdf"
+  filename        String
+  type            DocumentType
+  // Raw size in bytes; API formats to "1.2 MB".
+  sizeBytes       BigInt
+  status          DocumentStatus @default(PROCESSING)
+  // Count of indexed chunks; 0 until processed. (No vector store in Phase 1 —
+  // this is a plain counter the future indexer will update.)
+  chunkCount      Int            @default(0)
+  // Object storage key in R2/S3, plus optional CDN url.
+  storageKey      String
+  fileUrl         String?        @db.Text
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  organization  Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  knowledgeBase KnowledgeBase? @relation(fields: [knowledgeBaseId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId])
+  @@index([knowledgeBaseId])
+  @@index([status])
+  @@map("documents")
+}
+
+// ---------------------------------------------------------------------------
+// TELEPHONY METADATA  — PhoneNumber (no provider integration; just records)
+// ---------------------------------------------------------------------------
+
+model PhoneNumber {
+  id             String      @id @default(cuid())
+  organizationId String
+  agentId        String?
+  // E.164 ideally; stored as given for now.
+  number         String
+  // Display label: "Exotel", "Twilio", "Local SIP (Nepal)".
+  provider       String
+  type           PhoneType   @default(OUTBOUND)
+  status         PhoneStatus @default(ACTIVE)
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  agent        Agent?       @relation(fields: [agentId], references: [id], onDelete: SetNull)
+
+  @@unique([organizationId, number])
+  @@index([agentId])
+  @@map("phone_numbers")
+}
+
+// ---------------------------------------------------------------------------
+// CALLS  — Call + CallMessage (transcript turns)
+// ---------------------------------------------------------------------------
+
+model Call {
+  id             String         @id @default(cuid())
+  organizationId String
+  agentId        String
+  campaignId     String?
+  // Caller/callee number. UI masks it for display; store raw, mask at API.
+  customerNumber String
+  direction      CallDirection  @default(OUTBOUND)
+  durationSeconds Int           @default(0)
+  outcome        CallOutcome?
+  sentiment      CallSentiment?
+  // Object storage key for the recording (future); null in Phase 1.
+  recordingKey   String?
+  // When the call happened (UI shows "Today, 14:22" / relative).
+  startedAt      DateTime       @default(now())
+  endedAt        DateTime?
+  createdAt      DateTime       @default(now())
+
+  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  agent        Agent         @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  campaign     Campaign?     @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  messages     CallMessage[]
+
+  // Calls list is sorted by time, filtered by outcome, scoped to org/agent.
+  @@index([organizationId, startedAt])
+  @@index([agentId, startedAt])
+  @@index([campaignId])
+  @@index([outcome])
+  @@map("calls")
+}
+
+model CallMessage {
+  id        String   @id @default(cuid())
+  callId    String
+  // "agent" | "caller" — kept as String to match transcript shape exactly.
+  speaker   String
+  // Offset label "0:06" and/or ms offset. Store ms; format on read.
+  offsetMs  Int      @default(0)
+  text      String   @db.Text
+  createdAt DateTime @default(now())
+
+  call Call @relation(fields: [callId], references: [id], onDelete: Cascade)
+
+  @@index([callId])
+  @@map("call_messages")
+}
+
+// ---------------------------------------------------------------------------
+// CAMPAIGNS  — Campaign + Contact
+// ---------------------------------------------------------------------------
+
+model Campaign {
+  id             String         @id @default(cuid())
+  organizationId String
+  agentId        String
+  name           String
+  status         CampaignStatus @default(DRAFT)
+  scheduledAt    DateTime?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  agent        Agent        @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  contacts     Contact[]
+  calls        Call[]
+
+  // contactCount / reachedCount / progress are DERIVED from contacts — computed
+  // by the service, not stored. See architecture doc.
+
+  @@index([organizationId, status])
+  @@index([agentId])
+  @@map("campaigns")
+}
+
+model Contact {
+  id             String        @id @default(cuid())
+  organizationId String
+  campaignId     String
+  name           String?
+  phone          String
+  status         ContactStatus @default(PENDING)
+  // Arbitrary CSV columns preserved for personalization.
+  metadata       Json?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  campaign     Campaign     @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId, status])
+  @@index([organizationId])
+  @@map("contacts")
+}
+
+// ---------------------------------------------------------------------------
+// DEVELOPER  — ApiKey  (matches /dashboard/api page)
+// ---------------------------------------------------------------------------
+
+model ApiKey {
+  id             String    @id @default(cuid())
+  organizationId String
+  name           String
+  // Store ONLY a hash of the secret. Never the raw key.
+  hashedKey      String    @unique
+  // First chars for display: "vsk_live_8f3a..." The rest is never retrievable.
+  prefix         String
+  lastUsedAt     DateTime?
+  // Soft-revoke instead of delete, to keep audit history.
+  revokedAt      DateTime?
+  createdAt      DateTime  @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@map("api_keys")
+}
+
+// ---------------------------------------------------------------------------
+// BILLING  — Subscription + Invoice + UsageCounter
+// ---------------------------------------------------------------------------
+
+model Subscription {
+  id                   String             @id @default(cuid())
+  organizationId       String             @unique
+  plan                 SubscriptionPlan   @default(STARTER)
+  status               SubscriptionStatus @default(TRIALING)
+  // Stripe linkage.
+  stripeCustomerId     String?            @unique
+  stripeSubscriptionId String?            @unique
+  currentPeriodStart   DateTime?
+  currentPeriodEnd     DateTime?
+  cancelAtPeriodEnd    Boolean            @default(false)
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@map("subscriptions")
+}
+
+model Invoice {
+  id              String        @id @default(cuid())
+  organizationId  String
+  // Human number "INV-2026-009".
+  number          String
+  stripeInvoiceId String?       @unique
+  // Money in minor units (paise). Never a float, never a display string.
+  amountMinor     Int
+  currency        String        @default("INR")
+  status          InvoiceStatus @default(OPEN)
+  issuedAt        DateTime      @default(now())
+  // Hosted invoice / PDF link from Stripe.
+  hostedUrl       String?       @db.Text
+  createdAt       DateTime      @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, number])
+  @@index([organizationId, issuedAt])
+  @@map("invoices")
+}
+
+// Monthly usage rollup for plan-limit enforcement (minutes, agents, numbers).
+// Lets the billing page show "1,910 / 3,000" without scanning the calls table.
+model UsageCounter {
+  id             String   @id @default(cuid())
+  organizationId String
+  // "YYYY-MM" bucket.
+  period         String
+  aiMinutesUsed  Int      @default(0)
+  callsCount     Int      @default(0)
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, period])
+  @@map("usage_counters")
+}
+
+// ---------------------------------------------------------------------------
+// AUDIT  — lightweight action log (powers the activity feed honestly)
+// ---------------------------------------------------------------------------
+
+model AuditLog {
+  id             String   @id @default(cuid())
+  organizationId String
+  // Actor; null = system/agent action.
+  userId         String?
+  // "agent.published", "call.booked", "campaign.completed", ...
+  action         String
+  // Target entity type + id, plus any human summary for the feed.
+  entityType     String?
+  entityId       String?
+  summary        String?  @db.Text
+  metadata       Json?
+  createdAt      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User?        @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, createdAt])
+  @@map("audit_logs")
+}
